@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import shap
 
 from preprocessing import (
     FEATURE_COLUMNS,
@@ -31,21 +32,22 @@ from recommendations import recommend_from_patient_data
 def print_patient_summary(patient_data: pd.Series, probability: float, risk_label: str):
     """Print a clean, presentation-ready patient analysis summary."""
     print("\n" + "="*60)
-    print("🏥 HEART DISEASE RISK ASSESSMENT")
+    print("HEART DISEASE RISK ASSESSMENT")
     print("="*60)
 
     # Risk assessment section
-    print("\n📊 RISK ASSESSMENT")
+    print("\nRISK ASSESSMENT")
     print(f"   Predicted Probability: {probability:.1%}")
     print(f"   Risk Category: {risk_label}")
 
     # Patient profile section
-    print("\n👤 PATIENT PROFILE")
+    print("\nPATIENT PROFILE")
     print("   Age:", patient_data['age'])
     print("   Sex:", "Female" if patient_data['sex'] == 'F' else "Male")
     print("   Chest Pain Type:", patient_data['cp'])
     print("   Resting Blood Pressure:", patient_data['trestbps'])
-    print("   Cholesterol:", patient_data['chol'])
+    chol_value = patient_data['chol']
+    print("   Cholesterol:", "Not Available" if pd.isna(chol_value) else chol_value)    
     print("   Fasting Blood Sugar:", "High" if patient_data['fbs'] == 1 else "Normal")
     print("   Resting ECG:", patient_data['restecg'])
     print("   Max Heart Rate:", patient_data['thalach'])
@@ -107,14 +109,12 @@ def main():
     pipeline_path = "saved_models/ensemble_pipeline.joblib"
 
     if pipeline_exists(pipeline_path):
-        print("Loading saved model pipeline...")
         persisted = load_pipeline(pipeline_path)
         preprocessor = persisted["preprocessor"]
         base_models = persisted["base_models"]
         ensemble_model = persisted["ensemble_model"]
         X_train_prepared = preprocessor.transform(X_train)
         X_test_prepared = preprocessor.transform(X_test)
-        print("\nLoaded existing model pipeline. Skipping retraining.")
     else:
         preprocessor = build_preprocessor()
         preprocessor.fit(X_train)
@@ -123,13 +123,8 @@ def main():
         X_test_prepared = preprocessor.transform(X_test)
 
         base_models = build_base_models()
-        print("\nIndividual base model metrics:")
         for name, model in base_models.items():
             model.fit(X_train_prepared, y_train)
-            model_metrics = evaluate_model(model, X_test_prepared, y_test)
-            print(f"\n{name.replace('_', ' ').title()}")
-            for metric_name, score in model_metrics.items():
-                print(f"- {metric_name}: {score:.4f}")
 
         ensemble_model = build_ensemble(base_models)
         ensemble_model.fit(X_train_prepared, y_train)
@@ -140,6 +135,15 @@ def main():
             "ensemble_model": ensemble_model,
         })
         print(f"Saved trained pipeline to {pipeline_path}")
+
+    print("\n[AI] BASE MODEL PERFORMANCE")
+    print("-" * 40)
+    for name, model in base_models.items():
+        model_metrics = evaluate_model(model, X_test_prepared, y_test)
+        print(f"\n{name.replace('_', ' ').title()}")
+        print(f"   Accuracy:  {model_metrics['accuracy']:.1%}")
+        print(f"   Precision: {model_metrics['precision']:.1%}")
+        print(f"   Recall:    {model_metrics['recall']:.1%}")
 
     print("\n[AI] MODEL PERFORMANCE")
     print("-" * 40)
@@ -155,7 +159,7 @@ def main():
     if use_manual_input:
         sample = prompt_user_input()
     else:
-        sample = X_test.iloc[0]
+        sample = X_test.iloc[0].copy()
 
     sample_prepared = preprocessor.transform(pd.DataFrame([sample]))
     probability = float(ensemble_model.predict_proba(sample_prepared)[:, 1][0])
@@ -169,24 +173,56 @@ def main():
         names = transformer[-1].get_feature_names_out(columns)
         feature_names.extend(names)
     
-    shap_df, shap_values = compute_shap_explanation(ensemble_model, X_train_prepared, feature_names)
-    
-    # Generate patient-specific explanations
-    patient_explanations = generate_patient_specific_shap_explanation(shap_df.iloc[0], sample, top_n=8)
+    # Compute SHAP contributions for the shown patient (sample)
+    shap_df, _ = compute_shap_explanation(ensemble_model, X_train_prepared, feature_names)
 
-    print("\n[AI] AI EXPLANATION (SHAP Analysis)")
+    def _to_dense(x):
+        return x.toarray() if hasattr(x, "toarray") else x
+
+    X_background = _to_dense(X_train_prepared[:50])
+    X_patient = _to_dense(sample_prepared)
+
+    def predict_fn(X_input):
+        return ensemble_model.predict_proba(X_input)[:, 1]
+
+    try:
+        explainer = shap.explainers.Permutation(predict_fn, X_background, seed=42)
+        shap_values = explainer(X_patient, silent=True, max_evals=200)
+    except Exception:
+        explainer = shap.KernelExplainer(predict_fn, X_background[:20])
+        shap_values = explainer(X_patient, silent=True)
+
+    contributions = pd.Series(shap_values.values[0], index=feature_names)
+    # Keep only the one-hot category that matches the patient's actual value,
+    # to avoid showing contradictory pairs like "Exercise Angina: Yes" and "No".
+    selected = []
+    numeric_features = {"age", "trestbps", "chol", "thalach", "oldpeak"}
+    selected.extend([f for f in contributions.index if f in numeric_features])
+
+    sex_key = f"sex_{sample.get('sex', '')}"
+    cp_key = f"cp_{sample.get('cp', '')}"
+    fbs_key = f"fbs_{int(sample.get('fbs', 0))}"
+    restecg_key = f"restecg_{sample.get('restecg', '')}"
+    exang_key = f"exang_{sample.get('exang', '')}"
+    for key in [sex_key, cp_key, fbs_key, restecg_key, exang_key]:
+        if key in contributions.index:
+            selected.append(key)
+
+    selected_contributions = contributions[selected]
+    selected_contributions = selected_contributions.sort_values(key=lambda s: s.abs(), ascending=False)
+    top_contrib = selected_contributions.head(5)
+
+    print("\nSHAP Explanation (Explainable AI)")
     print("-" * 40)
-    print("Top factors influencing this prediction:")
+    print("Feature\tImpact")
+    for encoded_feature, impact in top_contrib.items():
+        readable = map_encoded_feature_to_name(encoded_feature)
+        print(f"{readable}\t{impact:+.4f}")
 
-    for explanation in patient_explanations[:5]:  # Show top 5 explanations
-        print(f"   • {explanation}")
-
-    print("\nFEATURE IMPORTANCE RANKING")
-    print("-" * 40)
-    importance = get_shap_importance(shap_df)
-    for i, (feature, score) in enumerate(importance.head(5).items(), 1):
-        readable_name = map_encoded_feature_to_name(feature)
-        print(f"   {i}. {readable_name}: {score:.4f}")
+    print("\nTop Risk Factors:")
+    for encoded_feature, impact in top_contrib.items():
+        if impact > 0:
+            print(f"- {map_encoded_feature_to_name(encoded_feature)}")
 
     print("\nPERSONALIZED RECOMMENDATIONS")
     print("-" * 40)
@@ -199,31 +235,29 @@ def main():
 
     print("\nLIFESTYLE IMPACT SIMULATION")
     print("-" * 40)
-    print("How lifestyle changes could affect risk:")
+    print("Lifestyle Simulation:")
 
     scenarios = {
-        "Reduce cholesterol to 200": {"chol": 200},
-        "Increase exercise": {"exang": 0},
-        "Improve both": {"chol": 200, "exang": 0},
-    }
+    "Reduce cholesterol to 200": {},
+    "Increase exercise": {},
+    "Improve both": {},
+}
+    if pd.isna(sample['chol']):
+        sample['chol'] = df['chol'].median()
 
     results = simulate_lifestyle_changes(sample, preprocessor, ensemble_model, scenarios)
-    formatted_results = format_lifestyle_simulation_results(results)
 
-    for result in formatted_results:
-        print(f"   - {result}")
+    current_risk = results[0]["original_probability"] if results else probability
+    print(f"\nCurrent Risk: {current_risk:.0%}\n")
 
-    print("\n" + "="*70)
-    print("ANALYSIS COMPLETE - All improvements implemented:")
-    print("   - SHAP maps to real input values")
-    print("   - SHAP uses correct increase/decrease signs")
-    print("   - No wrong labeling (shows actual patient values)")
-    print("   - Recommendations only when conditions met")
-    print("   - Personalized, condition-based advice")
-    print("   - Realistic lifestyle simulation")
-    print("   - Clear before/after comparisons")
-    print("   - Clean, presentation-ready output")
-    print("="*70)
+    label_map = {
+        "Reduce cholesterol to 200": "If cholesterol reduced",
+        "Increase exercise": "If exercise increased",
+        "Improve both": "If both improved",
+    }
+    for r in results:
+        label = label_map.get(r["scenario"], f"If {r['scenario'].lower()}")
+        print(f"{label} -> Risk becomes {r['new_probability']:.0%}")
 
     print("\n" + "="*60)
     print("[WARNING] IMPORTANT: This is for educational purposes only.")

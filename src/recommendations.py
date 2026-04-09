@@ -28,7 +28,7 @@ def recommend_from_patient_data(patient_data: pd.Series) -> List[str]:
     # Exercise-induced angina present
     if patient_data.get('exang', 'N') == 'Y':
         recommendations.append(
-            "Work with your doctor on safe exercise plans if exercise-induced angina is present."
+            "If you feel chest pain during exercise, follow a doctor-guided safe exercise plan (exercise-induced angina present)."
         )
 
     # ST depression > 2.0 mm

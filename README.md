@@ -20,6 +20,31 @@ This project implements an explainable ensemble machine learning pipeline for ea
 pip install -r requirements.txt
 ```
 
+## Run (Windows / PowerShell)
+From the project root (the folder containing `requirements.txt`), run:
+
+```powershell
+python src\predict.py
+```
+
+### Notes
+- **Dataset path used by the code**: `data/heart (1).csv`
+  - Your CSV can use either the normalized column names (`age, sex, cp, ... target`) or the common Heart dataset names (`Age, Sex, ChestPainType, ... HeartDisease`) — the code renames them internally.
+- **Saved model cache**: the trained pipeline is stored at `saved_models/ensemble_pipeline.joblib`.
+  - If it exists, the project will load it and skip retraining.
+  - To force retraining:
+
+```powershell
+Remove-Item .\saved_models\ensemble_pipeline.joblib
+python src\predict.py
+```
+
+- **Stop creating `__pycache__` files (optional)**:
+
+```powershell
+python -B src\predict.py
+```
+
 ## Workflow
 1. Load and preprocess clinical data
 2. Train base models (Logistic Regression, Random Forest, Gradient Boosting, XGBoost)
@@ -30,7 +55,7 @@ pip install -r requirements.txt
 7. Create personalized prevention advice
 
 ## Dataset
-Place your heart disease dataset in `data/heart_disease.csv`. The dataset should include the following columns:
+Place your heart disease dataset in `data/heart (1).csv`. The dataset should include the following columns:
 - `age`
 - `sex`
 - `cp`

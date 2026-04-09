@@ -67,9 +67,7 @@ def validate_data(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     missing_counts = df[FEATURE_COLUMNS].isna().sum()
-    if missing_counts.any():
-        missing_report = missing_counts[missing_counts > 0].to_dict()
-        print(f"Warning: missing values found in features: {missing_report}")
+    # Note: missing values are handled by imputers in the preprocessing pipeline.
     return df
 
 
